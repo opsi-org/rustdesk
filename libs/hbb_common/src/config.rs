@@ -12,7 +12,7 @@ use std::{
     time::SystemTime,
 };
 
-pub const APP_NAME: &str = "RustDesk";
+pub const APP_NAME: &str = "RustDesk-uib";
 pub const RENDEZVOUS_TIMEOUT: u64 = 12_000;
 pub const CONNECT_TIMEOUT: u64 = 18_000;
 pub const REG_INTERVAL: i64 = 12_000;
