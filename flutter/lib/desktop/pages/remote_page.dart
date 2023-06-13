@@ -24,6 +24,7 @@ import '../../common/shared_state.dart';
 import '../../utils/image.dart';
 import '../widgets/remote_toolbar.dart';
 import '../widgets/kb_layout_type_chooser.dart';
+import '../widgets/tabbar_widget.dart';
 
 final SimpleWrapper<bool> _firstEnterImage = SimpleWrapper(false);
 
@@ -32,17 +33,19 @@ class RemotePage extends StatefulWidget {
     Key? key,
     required this.id,
     required this.password,
-    required this.menubarState,
+    required this.toolbarState,
+    required this.tabController,
     this.switchUuid,
     this.forceRelay,
   }) : super(key: key);
 
   final String id;
   final String? password;
-  final MenubarState menubarState;
+  final ToolbarState toolbarState;
   final String? switchUuid;
   final bool? forceRelay;
   final SimpleWrapper<State<RemotePage>?> _lastState = SimpleWrapper(null);
+  final DesktopTabController tabController;
 
   FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;
 
@@ -72,9 +75,11 @@ class _RemotePageState extends State<RemotePage>
 
   final FocusNode _rawKeyFocusNode = FocusNode(debugLabel: "rawkeyFocusNode");
 
-  Function(bool)? _onEnterOrLeaveImage4Menubar;
+  Function(bool)? _onEnterOrLeaveImage4Toolbar;
 
   late FFI _ffi;
+
+  SessionID get sessionId => _ffi.sessionId;
 
   void _initStates(String id) {
     initSharedStates(id);
@@ -117,19 +122,19 @@ class _RemotePageState extends State<RemotePage>
         debugPrint("id: $id, texture_key: $_textureKey");
         if (id != -1) {
           final ptr = await textureRenderer.getTexturePtr(_textureKey);
-          platformFFI.registerTexture(widget.id, ptr);
+          platformFFI.registerTexture(sessionId, ptr);
           _textureId.value = id;
         }
       });
     }
-    _ffi.ffiModel.updateEventListener(widget.id);
+    _ffi.ffiModel.updateEventListener(sessionId, widget.id);
     bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
-    _ffi.qualityMonitorModel.checkShowQualityMonitor(widget.id);
+    _ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
     // Session option should be set after models.dart/FFI.start
     _showRemoteCursor.value = bind.sessionGetToggleOptionSync(
-        id: widget.id, arg: 'show-remote-cursor');
-    _zoomCursor.value =
-        bind.sessionGetToggleOptionSync(id: widget.id, arg: 'zoom-cursor');
+        sessionId: sessionId, arg: 'show-remote-cursor');
+    _zoomCursor.value = bind.sessionGetToggleOptionSync(
+        sessionId: sessionId, arg: 'zoom-cursor');
     DesktopMultiWindow.addListener(this);
     // if (!_isCustomCursorInited) {
     //   customCursorController.registerNeedUpdateCursorCallback(
@@ -144,6 +149,7 @@ class _RemotePageState extends State<RemotePage>
     // }
 
     _blockableOverlayState.applyFfi(_ffi);
+    widget.tabController.onSelected?.call(widget.id);
   }
 
   @override
@@ -177,17 +183,37 @@ class _RemotePageState extends State<RemotePage>
     if (Platform.isWindows) {
       _isWindowBlur = false;
     }
+    if (!Platform.isLinux) {
+      Wakelock.enable();
+    }
+  }
+
+  // When the window is unminimized, onWindowMaximize or onWindowRestore can be called when the old state was maximized or not.
+  @override
+  void onWindowMaximize() {
+    super.onWindowMaximize();
+    if (!Platform.isLinux) {
+      Wakelock.enable();
+    }
+  }
+
+  @override
+  void onWindowMinimize() {
+    super.onWindowMinimize();
+    if (!Platform.isLinux) {
+      Wakelock.disable();
+    }
   }
 
   @override
   void dispose() {
     debugPrint("REMOTE PAGE dispose ${widget.id}");
     if (useTextureRender) {
-      platformFFI.registerTexture(widget.id, 0);
+      platformFFI.registerTexture(sessionId, 0);
       textureRenderer.closeTexture(_textureKey);
     }
     // ensure we leave this session, this is a double check
-    bind.sessionEnterOrLeave(id: widget.id, enter: false);
+    bind.sessionEnterOrLeave(sessionId: sessionId, enter: false);
     DesktopMultiWindow.removeListener(this);
     _ffi.dialogManager.hideMobileActionsOverlay();
     _ffi.recordingModel.onClose();
@@ -239,14 +265,14 @@ class _RemotePageState extends State<RemotePage>
                 child: getBodyForDesktop(context))),
         upperLayer: [
           OverlayEntry(
-              builder: (context) => RemoteMenubar(
+              builder: (context) => RemoteToolbar(
                     id: widget.id,
                     ffi: _ffi,
-                    state: widget.menubarState,
+                    state: widget.toolbarState,
                     onEnterOrLeaveImageSetter: (func) =>
-                        _onEnterOrLeaveImage4Menubar = func,
+                        _onEnterOrLeaveImage4Toolbar = func,
                     onEnterOrLeaveImageCleaner: () =>
-                        _onEnterOrLeaveImage4Menubar = null,
+                        _onEnterOrLeaveImage4Toolbar = null,
                   ))
         ],
       ),
@@ -258,7 +284,7 @@ class _RemotePageState extends State<RemotePage>
     super.build(context);
     return WillPopScope(
         onWillPop: () async {
-          clientClose(widget.id, _ffi.dialogManager);
+          clientClose(sessionId, _ffi.dialogManager);
           return false;
         },
         child: MultiProvider(providers: [
@@ -273,9 +299,9 @@ class _RemotePageState extends State<RemotePage>
   void enterView(PointerEnterEvent evt) {
     _cursorOverImage.value = true;
     _firstEnterImage.value = true;
-    if (_onEnterOrLeaveImage4Menubar != null) {
+    if (_onEnterOrLeaveImage4Toolbar != null) {
       try {
-        _onEnterOrLeaveImage4Menubar!(true);
+        _onEnterOrLeaveImage4Toolbar!(true);
       } catch (e) {
         //
       }
@@ -285,7 +311,7 @@ class _RemotePageState extends State<RemotePage>
       if (!_rawKeyFocusNode.hasFocus) {
         _rawKeyFocusNode.requestFocus();
       }
-      bind.sessionEnterOrLeave(id: widget.id, enter: true);
+      bind.sessionEnterOrLeave(sessionId: sessionId, enter: true);
     }
   }
 
@@ -296,16 +322,16 @@ class _RemotePageState extends State<RemotePage>
 
     _cursorOverImage.value = false;
     _firstEnterImage.value = false;
-    if (_onEnterOrLeaveImage4Menubar != null) {
+    if (_onEnterOrLeaveImage4Toolbar != null) {
       try {
-        _onEnterOrLeaveImage4Menubar!(false);
+        _onEnterOrLeaveImage4Toolbar!(false);
       } catch (e) {
         //
       }
     }
     // See [onWindowBlur].
     if (!Platform.isWindows) {
-      bind.sessionEnterOrLeave(id: widget.id, enter: false);
+      bind.sessionEnterOrLeave(sessionId: sessionId, enter: false);
     }
   }
 
@@ -521,8 +547,8 @@ class _ImagePaintState extends State<ImagePaint> {
           imageWidget = Stack(
             children: [
               Positioned(
-                left: c.x,
-                top: c.y,
+                left: c.x.toInt().toDouble(),
+                top: c.y.toInt().toDouble(),
                 width: c.getDisplayWidth() * s,
                 height: c.getDisplayHeight() * s,
                 child: Texture(textureId: widget.textureId.value),

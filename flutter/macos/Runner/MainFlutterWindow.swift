@@ -7,7 +7,7 @@ import desktop_multi_window
 import desktop_drop
 import device_info_plus_macos
 import flutter_custom_cursor
-import package_info_plus_macos
+import package_info_plus
 import path_provider_foundation
 import screen_retriever
 import sqflite
@@ -22,7 +22,7 @@ import texture_rgba_renderer
 class MainFlutterWindow: NSWindow {
     override func awakeFromNib() {
         if (!rustdesk_core_main()){
-            print("Rustdesk core returns false, exiting without launching Flutter app")
+            // print("Rustdesk core returns false, exiting without launching Flutter app.")
             NSApplication.shared.terminate(self)
         }
         let flutterViewController = FlutterViewController.init()

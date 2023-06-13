@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_breadcrumb/flutter_breadcrumb.dart';
-import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:get/get.dart';
 import 'package:toggle_switch/toggle_switch.dart';
@@ -73,7 +72,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
     });
-    gFFI.ffiModel.updateEventListener(widget.id);
+    gFFI.ffiModel.updateEventListener(gFFI.sessionId, widget.id);
     Wakelock.enable();
   }
 
@@ -104,7 +103,8 @@ class _FileManagerPageState extends State<FileManagerPage> {
           leading: Row(children: [
             IconButton(
                 icon: Icon(Icons.close),
-                onPressed: () => clientClose(widget.id, gFFI.dialogManager)),
+                onPressed: () =>
+                    clientClose(gFFI.sessionId, gFFI.dialogManager)),
           ]),
           centerTitle: true,
           title: ToggleSwitch(
@@ -197,7 +197,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
                   } else if (v == "folder") {
                     final name = TextEditingController();
                     gFFI.dialogManager
-                        .show((setState, close) => CustomAlertDialog(
+                        .show((setState, close, context) => CustomAlertDialog(
                                 title: Text(translate("Create Folder")),
                                 content: Column(
                                   mainAxisSize: MainAxisSize.min,

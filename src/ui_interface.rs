@@ -18,9 +18,8 @@ use hbb_common::{
 };
 
 use hbb_common::{
-    config::{RENDEZVOUS_PORT, RENDEZVOUS_TIMEOUT},
+    config::{CONNECT_TIMEOUT, RENDEZVOUS_PORT},
     futures::future::join_all,
-    protobuf::Message as _,
     rendezvous_proto::*,
 };
 
@@ -60,6 +59,7 @@ pub fn get_id() -> String {
 #[inline]
 pub fn goto_install() {
     allow_err!(crate::run_me(vec!["--install"]));
+    std::process::exit(0);
 }
 
 #[inline]
@@ -75,29 +75,7 @@ pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) 
 
 #[inline]
 pub fn update_me(_path: String) {
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("pkexec")
-            .args(&["apt", "install", "-f", &_path])
-            .spawn()
-            .ok();
-        std::fs::remove_file(&_path).ok();
-        crate::run_me(Vec::<&str>::new()).ok();
-    }
-    #[cfg(windows)]
-    {
-        let mut path = _path;
-        if path.is_empty() {
-            if let Ok(tmp) = std::env::current_exe() {
-                path = tmp.to_string_lossy().to_string();
-            }
-        }
-        std::process::Command::new(path)
-            .arg("--update")
-            .spawn()
-            .ok();
-        std::process::exit(0);
-    }
+    goto_install();
 }
 
 #[inline]
@@ -131,12 +109,6 @@ pub fn get_license() -> String {
         );
     }
     Default::default()
-}
-
-#[inline]
-#[cfg(target_os = "windows")]
-pub fn get_option_opt(key: &str) -> Option<String> {
-    OPTIONS.lock().unwrap().get(key).map(|x| x.clone())
 }
 
 #[inline]
@@ -298,11 +270,28 @@ pub fn set_options(m: HashMap<String, String>) {
 #[inline]
 pub fn set_option(key: String, value: String) {
     let mut options = OPTIONS.lock().unwrap();
-    #[cfg(target_os = "macos")]
     if &key == "stop-service" {
-        let is_stop = value == "Y";
-        if is_stop && crate::platform::macos::uninstall(true) {
-            return;
+        #[cfg(target_os = "macos")]
+        {
+            let is_stop = value == "Y";
+            if is_stop && crate::platform::macos::uninstall_service(true) {
+                return;
+            }
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            if crate::platform::is_installed() {
+                if value == "Y" {
+                    if crate::platform::uninstall_service(true) {
+                        return;
+                    }
+                } else {
+                    if crate::platform::install_service() {
+                        return;
+                    }
+                }
+                return;
+            }
         }
     }
     if value.is_empty() {
@@ -398,10 +387,8 @@ pub fn is_installed_lower_version() -> bool {
     return false;
     #[cfg(windows)]
     {
-        let installed_version = crate::platform::windows::get_installed_version();
-        let a = hbb_common::get_version_number(crate::VERSION);
-        let b = hbb_common::get_version_number(&installed_version);
-        return a > b;
+        let b = crate::platform::windows::get_reg("BuildDate");
+        return crate::BUILD_DATE.cmp(&b).is_gt();
     }
 }
 
@@ -824,8 +811,8 @@ fn check_connect_status(reconnect: bool) -> mpsc::UnboundedSender<ipc::Data> {
 }
 
 #[cfg(feature = "flutter")]
-pub fn account_auth(op: String, id: String, uuid: String) {
-    account::OidcSession::account_auth(op, id, uuid);
+pub fn account_auth(op: String, id: String, uuid: String, remember_me: bool) {
+    account::OidcSession::account_auth(op, id, uuid, remember_me);
 }
 
 #[cfg(feature = "flutter")]
@@ -1004,7 +991,7 @@ async fn check_id(
 ) -> &'static str {
     if let Ok(mut socket) = hbb_common::socket_client::connect_tcp(
         crate::check_port(rendezvous_server, RENDEZVOUS_PORT),
-        RENDEZVOUS_TIMEOUT,
+        CONNECT_TIMEOUT,
     )
     .await
     {
@@ -1017,34 +1004,34 @@ async fn check_id(
         });
         let mut ok = false;
         if socket.send(&msg_out).await.is_ok() {
-            if let Some(Ok(bytes)) = socket.next_timeout(3_000).await {
-                if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
-                    match msg_in.union {
-                        Some(rendezvous_message::Union::RegisterPkResponse(rpr)) => {
-                            match rpr.result.enum_value_or_default() {
-                                register_pk_response::Result::OK => {
-                                    ok = true;
-                                }
-                                register_pk_response::Result::ID_EXISTS => {
-                                    return "Not available";
-                                }
-                                register_pk_response::Result::TOO_FREQUENT => {
-                                    return "Too frequent";
-                                }
-                                register_pk_response::Result::NOT_SUPPORT => {
-                                    return "server_not_support";
-                                }
-                                register_pk_response::Result::SERVER_ERROR => {
-                                    return "Server error";
-                                }
-                                register_pk_response::Result::INVALID_ID_FORMAT => {
-                                    return INVALID_FORMAT;
-                                }
-                                _ => {}
+            if let Some(msg_in) =
+                crate::common::get_next_nonkeyexchange_msg(&mut socket, None).await
+            {
+                match msg_in.union {
+                    Some(rendezvous_message::Union::RegisterPkResponse(rpr)) => {
+                        match rpr.result.enum_value_or_default() {
+                            register_pk_response::Result::OK => {
+                                ok = true;
                             }
+                            register_pk_response::Result::ID_EXISTS => {
+                                return "Not available";
+                            }
+                            register_pk_response::Result::TOO_FREQUENT => {
+                                return "Too frequent";
+                            }
+                            register_pk_response::Result::NOT_SUPPORT => {
+                                return "server_not_support";
+                            }
+                            register_pk_response::Result::SERVER_ERROR => {
+                                return "Server error";
+                            }
+                            register_pk_response::Result::INVALID_ID_FORMAT => {
+                                return INVALID_FORMAT;
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
         }

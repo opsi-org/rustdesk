@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::atomic::Ordering};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 #[cfg(not(windows))]
 use std::{fs::File, io::prelude::*};
 
@@ -36,6 +39,9 @@ pub enum PrivacyModeState {
     OffByPeer,
     OffUnknown,
 }
+// IPC actions here.
+pub const IPC_ACTION_CLOSE: &str = "close";
+pub static EXIT_RECV_CLOSE: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "t", content = "c")]
@@ -145,7 +151,7 @@ pub enum DataPortableService {
     Ping,
     Pong,
     ConnCount(Option<usize>),
-    Mouse(Vec<u8>),
+    Mouse((Vec<u8>, i32)),
     Key(Vec<u8>),
     RequestStart,
     WillClose,
@@ -332,9 +338,11 @@ async fn handle(data: Data, stream: &mut Connection) {
         }
         Data::Close => {
             log::info!("Receive close message");
-            #[cfg(not(target_os = "android"))]
-            crate::server::input_service::fix_key_down_timeout_at_exit();
-            std::process::exit(0);
+            if EXIT_RECV_CLOSE.load(Ordering::SeqCst) {
+                #[cfg(not(target_os = "android"))]
+                crate::server::input_service::fix_key_down_timeout_at_exit();
+                std::process::exit(0);
+            }
         }
         Data::OnlineStatus(_) => {
             let x = config::ONLINE
@@ -869,6 +877,14 @@ pub async fn send_url_scheme(url: String) -> ResultType<()> {
         .send(&Data::UrlLink(url))
         .await?;
     Ok(())
+}
+
+// Emit `close` events to ipc.
+pub fn close_all_instances() -> ResultType<bool> {
+    match crate::ipc::send_url_scheme(IPC_ACTION_CLOSE.to_owned()) {
+        Ok(_) => Ok(true),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(test)]

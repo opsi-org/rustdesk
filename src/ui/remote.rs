@@ -223,12 +223,12 @@ impl InvokeUiSession for SciterHandler {
         self.call("adaptSize", &make_args!());
     }
 
-    fn on_rgba(&self, data: &mut Vec<u8>) {
+    fn on_rgba(&self, rgba: &mut scrap::ImageRgb) {
         VIDEO
             .lock()
             .unwrap()
             .as_mut()
-            .map(|v| v.render_frame(data).ok());
+            .map(|v| v.render_frame(&rgba.raw).ok());
     }
 
     fn set_peer_info(&self, pi: &PeerInfo) {
@@ -520,9 +520,10 @@ impl SciterSession {
     }
 
     fn alternative_codecs(&self) -> Value {
-        let (vp8, h264, h265) = self.0.alternative_codecs();
+        let (vp8, av1, h264, h265) = self.0.alternative_codecs();
         let mut v = Value::array(0);
         v.push(vp8);
+        v.push(av1);
         v.push(h264);
         v.push(h265);
         v

@@ -1,6 +1,6 @@
 use crate::{
     codec::{EncoderApi, EncoderCfg},
-    hw, ImageFormat, HW_STRIDE_ALIGN,
+    hw, ImageFormat, ImageRgb, HW_STRIDE_ALIGN,
 };
 use hbb_common::{
     allow_err,
@@ -23,7 +23,7 @@ use hwcodec::{
 const CFG_KEY_ENCODER: &str = "bestHwEncoders";
 const CFG_KEY_DECODER: &str = "bestHwDecoders";
 
-const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_YUV420P;
+const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_TIME_BASE: [i32; 2] = [1, 30];
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
@@ -227,30 +227,29 @@ pub struct HwDecoderImage<'a> {
 }
 
 impl HwDecoderImage<'_> {
-    // take dst_stride into account when you convert
-    pub fn to_fmt(
-        &self,
-        (fmt, dst_stride): (ImageFormat, usize),
-        fmt_data: &mut Vec<u8>,
-        i420: &mut Vec<u8>,
-    ) -> ResultType<()> {
+    // rgb [in/out] fmt and stride must be set in ImageRgb
+    pub fn to_fmt(&self, rgb: &mut ImageRgb, i420: &mut Vec<u8>) -> ResultType<()> {
         let frame = self.frame;
+        rgb.w = frame.width as _;
+        rgb.h = frame.height as _;
+        // take dst_stride into account when you convert
+        let dst_stride = rgb.stride();
         match frame.pixfmt {
             AVPixelFormat::AV_PIX_FMT_NV12 => hw::hw_nv12_to(
-                fmt,
+                rgb.fmt(),
                 frame.width as _,
                 frame.height as _,
                 &frame.data[0],
                 &frame.data[1],
                 frame.linesize[0] as _,
                 frame.linesize[1] as _,
-                fmt_data,
+                &mut rgb.raw as _,
                 i420,
                 HW_STRIDE_ALIGN,
             ),
             AVPixelFormat::AV_PIX_FMT_YUV420P => {
                 hw::hw_i420_to(
-                    fmt,
+                    rgb.fmt(),
                     frame.width as _,
                     frame.height as _,
                     &frame.data[0],
@@ -259,7 +258,7 @@ impl HwDecoderImage<'_> {
                     frame.linesize[0] as _,
                     frame.linesize[1] as _,
                     frame.linesize[2] as _,
-                    fmt_data,
+                    &mut rgb.raw as _,
                 );
                 return Ok(());
             }
@@ -267,11 +266,17 @@ impl HwDecoderImage<'_> {
     }
 
     pub fn bgra(&self, bgra: &mut Vec<u8>, i420: &mut Vec<u8>) -> ResultType<()> {
-        self.to_fmt((ImageFormat::ARGB, 1), bgra, i420)
+        let mut rgb = ImageRgb::new(ImageFormat::ARGB, 1);
+        self.to_fmt(&mut rgb, i420)?;
+        *bgra = rgb.raw;
+        Ok(())
     }
 
     pub fn rgba(&self, rgba: &mut Vec<u8>, i420: &mut Vec<u8>) -> ResultType<()> {
-        self.to_fmt((ImageFormat::ABGR, 1), rgba, i420)
+        let mut rgb = ImageRgb::new(ImageFormat::ABGR, 1);
+        self.to_fmt(&mut rgb, i420)?;
+        *rgba = rgb.raw;
+        Ok(())
     }
 }
 
@@ -327,6 +332,8 @@ pub fn check_config_process() {
     use hbb_common::sysinfo::{ProcessExt, System, SystemExt};
 
     std::thread::spawn(move || {
+        // Remove to avoid checking process errors
+        // But when the program is just started, the configuration file has not been updated, and the new connection will read an empty configuration
         HwCodecConfig::remove();
         if let Ok(exe) = std::env::current_exe() {
             if let Some(file_name) = exe.file_name().to_owned() {
@@ -339,9 +346,16 @@ pub fn check_config_process() {
                     }
                 }
                 if let Ok(mut child) = std::process::Command::new(exe).arg(arg).spawn() {
-                    let second = 3;
-                    std::thread::sleep(std::time::Duration::from_secs(second));
-                    // kill: Different platforms have different results
+                    // wait up to 10 seconds
+                    for _ in 0..10 {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        if let Ok(Some(status)) = child.try_wait() {
+                            if status.success() {
+                                HwCodecConfig::refresh();
+                            }
+                            break;
+                        }
+                    }
                     allow_err!(child.kill());
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     match child.try_wait() {

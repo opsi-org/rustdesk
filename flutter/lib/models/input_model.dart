@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
 
@@ -45,12 +46,11 @@ class InputModel {
   var command = false;
 
   // trackpad
-  final _trackpadSpeed = 0.02;
   var _trackpadLastDelta = Offset.zero;
-  var _trackpadScrollUnsent = Offset.zero;
   var _stopFling = true;
+  var _fling = false;
   Timer? _flingTimer;
-  final _flingBaseDelay = 10;
+  final _flingBaseDelay = 30;
 
   // mouse
   final isPhysicalMouse = false.obs;
@@ -59,9 +59,13 @@ class InputModel {
 
   get id => parent.target?.id ?? "";
 
+  late final SessionID sessionId;
+
   bool get keyboardPerm => parent.target!.ffiModel.keyboard;
 
-  InputModel(this.parent);
+  InputModel(this.parent) {
+    sessionId = parent.target!.sessionId;
+  }
 
   KeyEventResult handleRawKeyEvent(FocusNode data, RawKeyEvent e) {
     if (isDesktop && !stateGlobal.grabKeyboard) {
@@ -70,7 +74,7 @@ class InputModel {
 
     // * Currently mobile does not enable map mode
     if (isDesktop) {
-      bind.sessionGetKeyboardMode(id: id).then((result) {
+      bind.sessionGetKeyboardMode(sessionId: sessionId).then((result) {
         keyboardMode = result.toString();
       });
     }
@@ -169,7 +173,7 @@ class InputModel {
       lockModes |= (1 << scrolllock);
     }
     bind.sessionHandleFlutterKeyEvent(
-        id: id,
+        sessionId: sessionId,
         name: name,
         platformCode: platformCode,
         positionCode: positionCode,
@@ -204,7 +208,7 @@ class InputModel {
   void inputKey(String name, {bool? down, bool? press}) {
     if (!keyboardPerm) return;
     bind.sessionInputKey(
-        id: id,
+        sessionId: sessionId,
         name: name,
         down: down ?? false,
         press: press ?? true,
@@ -264,7 +268,7 @@ class InputModel {
   /// Send scroll event with scroll distance [y].
   void scroll(int y) {
     bind.sessionSendMouse(
-        id: id,
+        sessionId: sessionId,
         msg: json
             .encode(modify({'id': id, 'type': 'wheel', 'y': y.toString()})));
   }
@@ -287,7 +291,7 @@ class InputModel {
   void sendMouse(String type, MouseButtons button) {
     if (!keyboardPerm) return;
     bind.sessionSendMouse(
-        id: id,
+        sessionId: sessionId,
         msg: json.encode(modify({'type': type, 'buttons': button.value})));
   }
 
@@ -297,7 +301,7 @@ class InputModel {
       resetModifiers();
     }
     _flingTimer?.cancel();
-    bind.sessionEnterOrLeave(id: id, enter: enter);
+    bind.sessionEnterOrLeave(sessionId: sessionId, enter: enter);
   }
 
   /// Send mouse movement event with distance in [x] and [y].
@@ -306,7 +310,8 @@ class InputModel {
     var x2 = x.toInt();
     var y2 = y.toInt();
     bind.sessionSendMouse(
-        id: id, msg: json.encode(modify({'x': '$x2', 'y': '$y2'})));
+        sessionId: sessionId,
+        msg: json.encode(modify({'x': '$x2', 'y': '$y2'})));
   }
 
   void onPointHoverImage(PointerHoverEvent e) {
@@ -320,14 +325,6 @@ class InputModel {
     }
   }
 
-  int _signOrZero(num x) {
-    if (x == 0) {
-      return 0;
-    } else {
-      return x > 0 ? 1 : -1;
-    }
-  }
-
   void onPointerPanZoomStart(PointerPanZoomStartEvent e) {
     _stopFling = true;
   }
@@ -335,104 +332,75 @@ class InputModel {
   // https://docs.flutter.dev/release/breaking-changes/trackpad-gestures
   // TODO(support zoom in/out)
   void onPointerPanZoomUpdate(PointerPanZoomUpdateEvent e) {
-    var delta = e.panDelta;
+    final delta = e.panDelta;
     _trackpadLastDelta = delta;
-    _trackpadScrollUnsent += (delta * _trackpadSpeed);
-    var x = _trackpadScrollUnsent.dx.truncate();
-    var y = _trackpadScrollUnsent.dy.truncate();
-    _trackpadScrollUnsent -= Offset(_trackpadScrollUnsent.dx - x.toDouble(),
-        _trackpadScrollUnsent.dy - y.toDouble());
-
-    if (x == 0 && y == 0) {
-      x = delta.dx > 1 ? 1 : (delta.dx < -1 ? -1 : 0);
-      y = delta.dy > 1 ? 1 : (delta.dy < -1 ? -1 : 0);
-      if (x.abs() > y.abs()) {
-        y = 0;
-      } else {
-        x = 0;
-      }
-    }
-
-    bind.sessionSendMouse(
-        id: id, msg: '{"type": "trackpad", "x": "$x", "y": "$y"}');
-  }
-
-  // Simple simulation for fling.
-  void _scheduleFling(var x, y, dx, dy) {
-    if (dx <= 0 && dy <= 0) {
-      return;
-    }
-    _flingTimer = Timer(Duration(milliseconds: 10), () {
+    var x = delta.dx.toInt();
+    var y = delta.dy.toInt();
+    if (x != 0 || y != 0) {
       bind.sessionSendMouse(
-          id: id, msg: '{"type": "trackpad", "x": "$x", "y": "$y"}');
-      dx--;
-      dy--;
-      if (dx == 0) {
-        x = 0;
-      }
-      if (dy == 0) {
-        y = 0;
-      }
-      _scheduleFling(x, y, dx, dy);
-    });
+          sessionId: sessionId,
+          msg: '{"type": "trackpad", "x": "$x", "y": "$y"}');
+    }
   }
 
-  void _scheduleFling2(double x, double y, int delay) {
+  void _scheduleFling(double x, double y, int delay) {
     if ((x == 0 && y == 0) || _stopFling) {
+      _fling = false;
       return;
     }
 
     _flingTimer = Timer(Duration(milliseconds: delay), () {
       if (_stopFling) {
+        _fling = false;
         return;
       }
 
-      final d = 0.95;
+      final d = 0.97;
       x *= d;
       y *= d;
-      final dx0 = x * _trackpadSpeed * 2;
-      final dy0 = y * _trackpadSpeed * 2;
 
       // Try set delta (x,y) and delay.
-      var dx = dx0.toInt();
-      var dy = dy0.toInt();
+      var dx = x.toInt();
+      var dy = y.toInt();
       var delay = _flingBaseDelay;
 
-      // Try set min delta (x,y), and increase delay.
       if (dx == 0 && dy == 0) {
-        final thr = 25;
-        var vx = thr;
-        var vy = thr;
-        if (dx0 != 0) {
-          vx = 1.0 ~/ dx0.abs();
-        }
-        if (dy0 != 0) {
-          vy = 1.0 ~/ dy0.abs();
-        }
-        if (vx < vy && vx < thr) {
-          delay *= vx;
-          dx = dx0 > 0 ? 1 : (dx0 < 0 ? -1 : 0);
-        } else if (vy < thr) {
-          delay *= vy;
-          dy = dy0 > 0 ? 1 : (dy0 < 0 ? -1 : 0);
-        }
-      }
-
-      if (dx == 0 && dy == 0) {
+        _fling = false;
         return;
       }
 
       bind.sessionSendMouse(
-          id: id, msg: '{"type": "trackpad", "x": "$dx", "y": "$dy"}');
-      _scheduleFling2(x, y, delay);
+          sessionId: sessionId,
+          msg: '{"type": "trackpad", "x": "$dx", "y": "$dy"}');
+      _scheduleFling(x, y, delay);
     });
   }
 
+  void waitLastFlingDone() {
+    if (_fling) {
+      _stopFling = true;
+    }
+    for (var i = 0; i < 5; i++) {
+      if (!_fling) {
+        break;
+      }
+      sleep(Duration(milliseconds: 10));
+    }
+    _flingTimer?.cancel();
+  }
+
   void onPointerPanZoomEnd(PointerPanZoomEndEvent e) {
+    waitLastFlingDone();
     _stopFling = false;
-    _trackpadScrollUnsent = Offset.zero;
-    _scheduleFling2(
-        _trackpadLastDelta.dx, _trackpadLastDelta.dy, _flingBaseDelay);
+
+    // 2.0 is an experience value
+    double minFlingValue = 2.0;
+    if (_trackpadLastDelta.dx.abs() > minFlingValue ||
+        _trackpadLastDelta.dy.abs() > minFlingValue) {
+      _fling = true;
+      _scheduleFling(
+          _trackpadLastDelta.dx, _trackpadLastDelta.dy, _flingBaseDelay);
+    }
     _trackpadLastDelta = Offset.zero;
   }
 
@@ -478,7 +446,8 @@ class InputModel {
         dy = 1;
       }
       bind.sessionSendMouse(
-          id: id, msg: '{"type": "wheel", "x": "$dx", "y": "$dy"}');
+          sessionId: sessionId,
+          msg: '{"type": "wheel", "x": "$dx", "y": "$dy"}');
     }
   }
 
@@ -671,7 +640,7 @@ class InputModel {
         break;
     }
     evt['buttons'] = buttons;
-    bind.sessionSendMouse(id: id, msg: json.encode(evt));
+    bind.sessionSendMouse(sessionId: sessionId, msg: json.encode(evt));
   }
 
   /// Web only

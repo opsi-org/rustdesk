@@ -10,10 +10,8 @@ import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
-import 'package:flutter_hbb/plugin/desc.dart';
-import 'package:flutter_hbb/plugin/model.dart';
-import 'package:flutter_hbb/plugin/common.dart';
-import 'package:flutter_hbb/plugin/widget.dart';
+import 'package:flutter_hbb/plugin/manager.dart';
+import 'package:flutter_hbb/plugin/widgets/desktop_settings.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -249,6 +247,9 @@ class _General extends StatefulWidget {
 }
 
 class _GeneralState extends State<_General> {
+  final RxBool serviceStop = Get.find<RxBool>(tag: 'stop-service');
+  RxBool serviceBtnEabled = true.obs;
+
   @override
   Widget build(BuildContext context) {
     final scrollController = ScrollController();
@@ -258,6 +259,7 @@ class _GeneralState extends State<_General> {
           physics: DraggableNeverScrollableScrollPhysics(),
           controller: scrollController,
           children: [
+            service(),
             theme(),
             hwcodec(),
             audio(context),
@@ -291,6 +293,21 @@ class _GeneralState extends State<_General> {
           groupValue: current,
           label: 'Follow System',
           onChanged: onChanged),
+    ]);
+  }
+
+  Widget service() {
+    return _Card(title: 'Service', children: [
+      Obx(() => _Button(serviceStop.value ? 'Start' : 'Stop', () {
+            () async {
+              serviceBtnEabled.value = false;
+              await start_service(serviceStop.value);
+              // enable the button after 1 second
+              Future.delayed(const Duration(seconds: 1), () {
+                serviceBtnEabled.value = true;
+              });
+            }();
+          }, enabled: serviceBtnEabled.value))
     ]);
   }
 
@@ -459,7 +476,6 @@ enum _AccessMode {
   custom,
   full,
   view,
-  deny,
 }
 
 class _Safety extends StatefulWidget {
@@ -474,7 +490,6 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
   bool get wantKeepAlive => true;
   bool locked = bind.mainIsInstalled();
   final scrollController = ScrollController();
-  final RxBool serviceStop = Get.find<RxBool>(tag: 'stop-service');
 
   @override
   Widget build(BuildContext context) {
@@ -508,26 +523,18 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
   }
 
   Widget permissions(context) {
-    return Obx(() => _permissions(context, serviceStop.value));
-  }
-
-  Widget _permissions(context, bool stopService) {
     bool enabled = !locked;
     return futureBuilder(future: () async {
       return await bind.mainGetOption(key: 'access-mode');
     }(), hasData: (data) {
       String accessMode = data! as String;
       _AccessMode mode;
-      if (stopService) {
-        mode = _AccessMode.deny;
+      if (accessMode == 'full') {
+        mode = _AccessMode.full;
+      } else if (accessMode == 'view') {
+        mode = _AccessMode.view;
       } else {
-        if (accessMode == 'full') {
-          mode = _AccessMode.full;
-        } else if (accessMode == 'view') {
-          mode = _AccessMode.view;
-        } else {
-          mode = _AccessMode.custom;
-        }
+        mode = _AccessMode.custom;
       }
       String initialKey;
       bool? fakeValue;
@@ -544,10 +551,6 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
           initialKey = 'view';
           fakeValue = false;
           break;
-        case _AccessMode.deny:
-          initialKey = 'deny';
-          fakeValue = false;
-          break;
       }
 
       return _Card(title: 'Permissions', children: [
@@ -556,63 +559,42 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
               '',
               'full',
               'view',
-              'deny'
             ],
             values: [
               translate('Custom'),
               translate('Full Access'),
               translate('Screen Share'),
-              translate('Deny remote access'),
             ],
             enabled: enabled,
             initialKey: initialKey,
             onChanged: (mode) async {
-              String modeValue;
-              bool stopService;
-              if (mode == 'deny') {
-                modeValue = '';
-                stopService = true;
-              } else {
-                modeValue = mode;
-                stopService = false;
-              }
-              await bind.mainSetOption(key: 'access-mode', value: modeValue);
-              await bind.mainSetOption(
-                  key: 'stop-service',
-                  value: bool2option('stop-service', stopService));
+              await bind.mainSetOption(key: 'access-mode', value: mode);
               setState(() {});
             }).marginOnly(left: _kContentHMargin),
-        Offstage(
-          offstage: mode == _AccessMode.deny,
-          child: Column(
-            children: [
-              _OptionCheckBox(
-                  context, 'Enable Keyboard/Mouse', 'enable-keyboard',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(context, 'Enable Clipboard', 'enable-clipboard',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context, 'Enable File Transfer', 'enable-file-transfer',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(context, 'Enable Audio', 'enable-audio',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(context, 'Enable TCP Tunneling', 'enable-tunnel',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context, 'Enable Remote Restart', 'enable-remote-restart',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context, 'Enable Recording Session', 'enable-record-session',
-                  enabled: enabled, fakeValue: fakeValue),
-              _OptionCheckBox(
-                  context,
-                  'Enable remote configuration modification',
-                  'allow-remote-config-modification',
-                  enabled: enabled,
-                  fakeValue: fakeValue),
-            ],
-          ),
-        )
+        Column(
+          children: [
+            _OptionCheckBox(context, 'Enable Keyboard/Mouse', 'enable-keyboard',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable Clipboard', 'enable-clipboard',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(
+                context, 'Enable File Transfer', 'enable-file-transfer',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable Audio', 'enable-audio',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable TCP Tunneling', 'enable-tunnel',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(
+                context, 'Enable Remote Restart', 'enable-remote-restart',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(
+                context, 'Enable Recording Session', 'enable-record-session',
+                enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable remote configuration modification',
+                'allow-remote-config-modification',
+                enabled: enabled, fakeValue: fakeValue),
+          ],
+        ),
       ]);
     });
   }
@@ -1324,6 +1306,11 @@ class _DisplayState extends State<_Display> {
           groupValue: groupValue,
           label: 'VP9',
           onChanged: onChanged),
+      _Radio(context,
+          value: 'av1',
+          groupValue: groupValue,
+          label: 'AV1',
+          onChanged: onChanged),
       ...hwRadios,
     ]);
   }
@@ -1352,6 +1339,7 @@ class _DisplayState extends State<_Display> {
     return _Card(title: 'Other Default Options', children: [
       otherRow('View Mode', 'view_only'),
       otherRow('show_monitors_tip', 'show_monitors_toolbar'),
+      otherRow('Collapse toolbar', 'collapse_toolbar'),
       otherRow('Show remote cursor', 'show_remote_cursor'),
       otherRow('Zoom cursor', 'zoom-cursor'),
       otherRow('Show quality monitor', 'show_quality_monitor'),
@@ -1448,57 +1436,6 @@ class _CheckboxState extends State<_Checkbox> {
   }
 }
 
-class PluginCard extends StatefulWidget {
-  final PluginId pluginId;
-  final Desc desc;
-  const PluginCard({
-    Key? key,
-    required this.pluginId,
-    required this.desc,
-  }) : super(key: key);
-
-  @override
-  State<PluginCard> createState() => PluginCardState();
-}
-
-class PluginCardState extends State<PluginCard> {
-  @override
-  Widget build(BuildContext context) {
-    final children = [
-      _Button(
-        'Reload',
-        () async {
-          clearPlugin(widget.pluginId);
-          await bind.pluginReload(id: widget.pluginId);
-          setState(() {});
-        },
-      ),
-      _Checkbox(
-        label: 'Enable',
-        getValue: () => bind.pluginIdIsEnabled(id: widget.pluginId),
-        setValue: (bool v) async {
-          if (!v) {
-            clearPlugin(widget.pluginId);
-          }
-          await bind.pluginIdEnable(id: widget.pluginId, v: v);
-          setState(() {});
-        },
-      ),
-    ];
-    final model = getPluginModel(kLocationHostMainPlugin, widget.pluginId);
-    if (model != null) {
-      children.add(PluginItem(
-        pluginId: widget.pluginId,
-        peerId: '',
-        location: kLocationHostMainPlugin,
-        pluginModel: model,
-        isMenu: false,
-      ));
-    }
-    return _Card(title: widget.desc.name, children: children);
-  }
-}
-
 class _Plugin extends StatefulWidget {
   const _Plugin({Key? key}) : super(key: key);
 
@@ -1507,43 +1444,30 @@ class _Plugin extends StatefulWidget {
 }
 
 class _PluginState extends State<_Plugin> {
-  // temp checkbox widget
-
-  List<Widget> _buildCards(DescModel model) => [
-        _Card(
-          title: 'Plugin',
-          children: [
-            _Checkbox(
-              label: 'Enable',
-              getValue: () => bind.pluginIsEnabled() ?? false,
-              setValue: (bool v) async {
-                if (!v) {
-                  clearLocations();
-                }
-                await bind.pluginEnable(v: v);
-              },
-            ),
-          ],
-        ),
-        ...model.all.entries
-            .map((entry) => PluginCard(pluginId: entry.key, desc: entry.value))
-            .toList(),
-      ];
-
   @override
   Widget build(BuildContext context) {
+    bind.pluginListReload();
     final scrollController = ScrollController();
     return DesktopScrollWrapper(
       scrollController: scrollController,
       child: ChangeNotifierProvider.value(
-        value: DescModel.instance,
-        child: Consumer<DescModel>(builder: (context, model, child) {
+        value: pluginManager,
+        child: Consumer<PluginManager>(builder: (context, model, child) {
           return ListView(
             physics: DraggableNeverScrollableScrollPhysics(),
             controller: scrollController,
-            children: _buildCards(model),
+            children: model.plugins.map((entry) => pluginCard(entry)).toList(),
           ).marginOnly(bottom: _kListViewBottomMargin);
         }),
+      ),
+    );
+  }
+
+  Widget pluginCard(PluginInfo plugin) {
+    return ChangeNotifierProvider.value(
+      value: plugin,
+      child: Consumer<PluginInfo>(
+        builder: (context, model, child) => DesktopSettingsCard(plugin: model),
       ),
     );
   }
@@ -1636,7 +1560,7 @@ class _AboutState extends State<_About> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Copyright © 2022 Purslane Ltd.\n$license',
+                                'Copyright © 2023 Purslane Ltd.\n$license',
                                 style: const TextStyle(color: Colors.white),
                               ),
                               Text(
@@ -2016,7 +1940,7 @@ void changeSocks5Proxy() async {
   RxBool obscure = true.obs;
 
   var isInProgress = false;
-  gFFI.dialogManager.show((setState, close) {
+  gFFI.dialogManager.show((setState, close, context) {
     submit() async {
       setState(() {
         proxyMsg = '';
@@ -2053,9 +1977,6 @@ void changeSocks5Proxy() async {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(
-              height: 8.0,
-            ),
             Row(
               children: [
                 ConstrainedBox(
@@ -2110,9 +2031,10 @@ void changeSocks5Proxy() async {
                       )),
                 ),
               ],
-            ).marginOnly(bottom: 8),
+            ),
             Offstage(
-                offstage: !isInProgress, child: const LinearProgressIndicator())
+                offstage: !isInProgress,
+                child: const LinearProgressIndicator().marginOnly(top: 8))
           ],
         ),
       ),

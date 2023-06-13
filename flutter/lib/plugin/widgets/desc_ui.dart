@@ -10,9 +10,9 @@ import 'package:get/get.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
-import './desc.dart';
-import './model.dart';
-import './common.dart';
+import '../manager.dart';
+import '../model.dart';
+import '../common.dart';
 
 // dup to flutter\lib\desktop\pages\desktop_setting_page.dart
 const double _kCheckBoxLeftMargin = 10;
@@ -79,7 +79,7 @@ class PluginItem extends StatelessWidget {
   final FFI? ffi;
   final String location;
   final PluginModel pluginModel;
-  final isMenu;
+  final bool isMenu;
 
   PluginItem({
     Key? key,
@@ -247,7 +247,7 @@ class PluginItem extends StatelessWidget {
   }) {
     final event = MsgFromUi(
       id: pluginId,
-      name: getDesc(pluginId)?.name ?? '',
+      name: pluginManager.getPlugin(pluginId)?.meta.name ?? '',
       location: location,
       key: key,
       value:
@@ -275,21 +275,27 @@ class PluginItem extends StatelessWidget {
   }
 }
 
-void handleReloading(Map<String, dynamic> evt, String peer) {
+void handleReloading(Map<String, dynamic> evt) {
   if (evt['id'] == null || evt['location'] == null) {
     return;
   }
   try {
-    final ui = UiType.create(json.decode(evt['ui'] as String));
-    if (ui != null) {
-      addLocationUi(evt['location']!, evt['id']!, ui);
+    final uiList = <UiType>[];
+    for (var e in json.decode(evt['ui'] as String)) {
+      final ui = UiType.create(e);
+      if (ui != null) {
+        uiList.add(ui);
+      }
+    }
+    if (uiList.isNotEmpty) {
+      addLocationUi(evt['location']!, evt['id']!, uiList);
     }
   } catch (e) {
     debugPrint('Failed handleReloading, json decode of ui, $e ');
   }
 }
 
-void handleOption(Map<String, dynamic> evt, String peer) {
+void handleOption(Map<String, dynamic> evt) {
   updateOption(
       evt['location'], evt['id'], evt['peer'] ?? '', evt['key'], evt['value']);
 }

@@ -32,8 +32,7 @@ use hbb_common::{
     anyhow::{anyhow, Context},
     bail,
     config::{
-        Config, PeerConfig, PeerInfoSerde, CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT,
-        RENDEZVOUS_TIMEOUT,
+        Config, PeerConfig, PeerInfoSerde, Resolution, CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT,
     },
     get_version_number, log,
     message_proto::{option_message::BoolOption, *},
@@ -42,6 +41,7 @@ use hbb_common::{
     rendezvous_proto::*,
     socket_client,
     sodiumoxide::crypto::{box_, secretbox, sign},
+    tcp::FramedStream,
     timeout,
     tokio::time::Duration,
     AddrMangle, ResultType, Stream,
@@ -50,13 +50,13 @@ pub use helper::*;
 use scrap::{
     codec::Decoder,
     record::{Recorder, RecorderContext},
-    ImageFormat,
+    ImageFormat, ImageRgb,
 };
 
-use crate::common::{self, is_keyboard_mode_supported};
+use crate::is_keyboard_mode_supported;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use crate::common::{check_clipboard, ClipboardContext, CLIPBOARD_INTERVAL};
+use crate::{check_clipboard, ClipboardContext, CLIPBOARD_INTERVAL};
 #[cfg(not(feature = "flutter"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::ui_session_interface::SessionPermissionConfig;
@@ -95,6 +95,17 @@ pub const SCRAP_OTHER_VERSION_OR_X11_REQUIRED: &str =
     "Wayland requires higher version of linux distro. Please try X11 desktop or change your OS.";
 pub const SCRAP_X11_REQUIRED: &str = "x11 expected";
 pub const SCRAP_X11_REF_URL: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";
+
+#[cfg(feature = "flutter")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) struct ClientClipboardContext;
+
+#[cfg(not(feature = "flutter"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) struct ClientClipboardContext {
+    pub cfg: SessionPermissionConfig,
+    pub tx: UnboundedSender<Data>,
+}
 
 /// Client of the remote desktop.
 pub struct Client;
@@ -228,7 +239,7 @@ impl Client {
             return Ok((
                 socket_client::connect_tcp(
                     crate::check_port(peer, RELAY_PORT + 1),
-                    RENDEZVOUS_TIMEOUT,
+                    CONNECT_TIMEOUT,
                 )
                 .await?,
                 true,
@@ -238,18 +249,18 @@ impl Client {
         // Allow connect to {domain}:{port}
         if hbb_common::is_domain_port_str(peer) {
             return Ok((
-                socket_client::connect_tcp(peer, RENDEZVOUS_TIMEOUT).await?,
+                socket_client::connect_tcp(peer, CONNECT_TIMEOUT).await?,
                 true,
                 None,
             ));
         }
         let (mut rendezvous_server, servers, contained) = crate::get_rendezvous_server(1_000).await;
-        let mut socket = socket_client::connect_tcp(&*rendezvous_server, RENDEZVOUS_TIMEOUT).await;
+        let mut socket = socket_client::connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await;
         debug_assert!(!servers.contains(&rendezvous_server));
         if socket.is_err() && !servers.is_empty() {
             log::info!("try the other servers: {:?}", servers);
             for server in servers {
-                socket = socket_client::connect_tcp(&*server, RENDEZVOUS_TIMEOUT).await;
+                socket = socket_client::connect_tcp(&*server, CONNECT_TIMEOUT).await;
                 if socket.is_ok() {
                     rendezvous_server = server;
                     break;
@@ -264,6 +275,11 @@ impl Client {
         let my_addr = socket.local_addr();
         let mut signed_id_pk = Vec::new();
         let mut relay_server = "".to_owned();
+
+        if !key.is_empty() && !token.is_empty() {
+            // mainly for the security of token
+            allow_err!(secure_punch_connection(&mut socket, key).await);
+        }
 
         let start = std::time::Instant::now();
         let mut peer_addr = Config::get_any_listen_addr(true);
@@ -288,71 +304,69 @@ impl Client {
                 ..Default::default()
             });
             socket.send(&msg_out).await?;
-            if let Some(Ok(bytes)) = socket.next_timeout(i * 6000).await {
-                if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
-                    match msg_in.union {
-                        Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
-                            if ph.socket_addr.is_empty() {
-                                if !ph.other_failure.is_empty() {
-                                    bail!(ph.other_failure);
-                                }
-                                match ph.failure.enum_value_or_default() {
-                                    punch_hole_response::Failure::ID_NOT_EXIST => {
-                                        bail!("ID does not exist");
-                                    }
-                                    punch_hole_response::Failure::OFFLINE => {
-                                        bail!("Remote desktop is offline");
-                                    }
-                                    punch_hole_response::Failure::LICENSE_MISMATCH => {
-                                        bail!("Key mismatch");
-                                    }
-                                    punch_hole_response::Failure::LICENSE_OVERUSE => {
-                                        bail!("Key overuse");
-                                    }
-                                }
-                            } else {
-                                peer_nat_type = ph.nat_type();
-                                is_local = ph.is_local();
-                                signed_id_pk = ph.pk.into();
-                                relay_server = ph.relay_server;
-                                peer_addr = AddrMangle::decode(&ph.socket_addr);
-                                log::info!("Hole Punched {} = {}", peer, peer_addr);
-                                break;
+            if let Some(msg_in) =
+                crate::get_next_nonkeyexchange_msg(&mut socket, Some(i * 6000)).await
+            {
+                match msg_in.union {
+                    Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
+                        if ph.socket_addr.is_empty() {
+                            if !ph.other_failure.is_empty() {
+                                bail!(ph.other_failure);
                             }
-                        }
-                        Some(rendezvous_message::Union::RelayResponse(rr)) => {
-                            log::info!(
-                                "relay requested from peer, time used: {:?}, relay_server: {}",
-                                start.elapsed(),
-                                rr.relay_server
-                            );
-                            signed_id_pk = rr.pk().into();
-                            let mut conn = Self::create_relay(
-                                peer,
-                                rr.uuid,
-                                rr.relay_server,
-                                key,
-                                conn_type,
-                                my_addr.is_ipv4(),
-                            )
-                            .await?;
-                            let pk = Self::secure_connection(
-                                peer,
-                                signed_id_pk,
-                                key,
-                                &mut conn,
-                                false,
-                                interface,
-                            )
-                            .await?;
-                            return Ok((conn, false, pk));
-                        }
-                        _ => {
-                            log::error!("Unexpected protobuf msg received: {:?}", msg_in);
+                            match ph.failure.enum_value_or_default() {
+                                punch_hole_response::Failure::ID_NOT_EXIST => {
+                                    bail!("ID does not exist");
+                                }
+                                punch_hole_response::Failure::OFFLINE => {
+                                    bail!("Remote desktop is offline");
+                                }
+                                punch_hole_response::Failure::LICENSE_MISMATCH => {
+                                    bail!("Key mismatch");
+                                }
+                                punch_hole_response::Failure::LICENSE_OVERUSE => {
+                                    bail!("Key overuse");
+                                }
+                            }
+                        } else {
+                            peer_nat_type = ph.nat_type();
+                            is_local = ph.is_local();
+                            signed_id_pk = ph.pk.into();
+                            relay_server = ph.relay_server;
+                            peer_addr = AddrMangle::decode(&ph.socket_addr);
+                            log::info!("Hole Punched {} = {}", peer, peer_addr);
+                            break;
                         }
                     }
-                } else {
-                    log::error!("Non-protobuf message bytes received: {:?}", bytes);
+                    Some(rendezvous_message::Union::RelayResponse(rr)) => {
+                        log::info!(
+                            "relay requested from peer, time used: {:?}, relay_server: {}",
+                            start.elapsed(),
+                            rr.relay_server
+                        );
+                        signed_id_pk = rr.pk().into();
+                        let mut conn = Self::create_relay(
+                            peer,
+                            rr.uuid,
+                            rr.relay_server,
+                            key,
+                            conn_type,
+                            my_addr.is_ipv4(),
+                        )
+                        .await?;
+                        let pk = Self::secure_connection(
+                            peer,
+                            signed_id_pk,
+                            key,
+                            &mut conn,
+                            false,
+                            interface,
+                        )
+                        .await?;
+                        return Ok((conn, false, pk));
+                    }
+                    _ => {
+                        log::error!("Unexpected protobuf msg received: {:?}", msg_in);
+                    }
                 }
             }
         }
@@ -529,15 +543,12 @@ impl Client {
                     if let Some(message::Union::SignedId(si)) = msg_in.union {
                         if let Ok((id, their_pk_b)) = decode_id_pk(&si.id, &sign_pk) {
                             if id == peer_id {
-                                let their_pk_b = box_::PublicKey(their_pk_b);
-                                let (our_pk_b, out_sk_b) = box_::gen_keypair();
-                                let key = secretbox::gen_key();
-                                let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
-                                let sealed_key = box_::seal(&key.0, &nonce, &their_pk_b, &out_sk_b);
+                                let (asymmetric_value, symmetric_value, key) =
+                                    create_symmetric_key_msg(their_pk_b);
                                 let mut msg_out = Message::new();
                                 msg_out.set_public_key(PublicKey {
-                                    asymmetric_value: Vec::from(our_pk_b.0).into(),
-                                    symmetric_value: sealed_key.into(),
+                                    asymmetric_value,
+                                    symmetric_value,
                                     ..Default::default()
                                 });
                                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
@@ -584,7 +595,7 @@ impl Client {
         let mut ipv4 = true;
         for i in 1..=3 {
             // use different socket due to current hbbs implement requiring different nat address for each attempt
-            let mut socket = socket_client::connect_tcp(rendezvous_server, RENDEZVOUS_TIMEOUT)
+            let mut socket = socket_client::connect_tcp(rendezvous_server, CONNECT_TIMEOUT)
                 .await
                 .with_context(|| "Failed to connect to rendezvous server")?;
 
@@ -661,9 +672,9 @@ impl Client {
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn try_stop_clipboard(_self_id: &str) {
+    fn try_stop_clipboard(_self_uuid: &uuid::Uuid) {
         #[cfg(feature = "flutter")]
-        if crate::flutter::other_sessions_running(_self_id) {
+        if crate::flutter::other_sessions_running(_self_uuid) {
             return;
         }
         TEXT_CLIPBOARD_STATE.lock().unwrap().running = false;
@@ -754,6 +765,7 @@ pub struct AudioHandler {
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     audio_stream: Option<Box<dyn StreamTrait>>,
     channels: u16,
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
     device_channel: u16,
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     ready: Arc<std::sync::Mutex<bool>>,
@@ -980,7 +992,7 @@ impl AudioHandler {
 /// Video handler for the [`Client`].
 pub struct VideoHandler {
     decoder: Decoder,
-    pub rgb: Vec<u8>,
+    pub rgb: ImageRgb,
     recorder: Arc<Mutex<Option<Recorder>>>,
     record: bool,
 }
@@ -990,7 +1002,7 @@ impl VideoHandler {
     pub fn new() -> Self {
         VideoHandler {
             decoder: Decoder::new(),
-            rgb: Default::default(),
+            rgb: ImageRgb::new(ImageFormat::ARGB, crate::DST_STRIDE_RGBA),
             recorder: Default::default(),
             record: false,
         }
@@ -1001,11 +1013,7 @@ impl VideoHandler {
     pub fn handle_frame(&mut self, vf: VideoFrame) -> ResultType<bool> {
         match &vf.union {
             Some(frame) => {
-                let res = self.decoder.handle_video_frame(
-                    frame,
-                    (ImageFormat::ARGB, crate::DST_STRIDE_RGBA),
-                    &mut self.rgb,
-                );
+                let res = self.decoder.handle_video_frame(frame, &mut self.rgb);
                 if self.record {
                     self.recorder
                         .lock()
@@ -1345,7 +1353,9 @@ impl LoginConfigHandler {
     ///
     /// * `ignore_default` - If `true`, ignore the default value of the option.
     fn get_option_message(&self, ignore_default: bool) -> Option<OptionMessage> {
-        if self.conn_type.eq(&ConnType::FILE_TRANSFER) || self.conn_type.eq(&ConnType::PORT_FORWARD)
+        if self.conn_type.eq(&ConnType::FILE_TRANSFER)
+            || self.conn_type.eq(&ConnType::PORT_FORWARD)
+            || self.conn_type.eq(&ConnType::RDP)
         {
             return None;
         }
@@ -1406,7 +1416,9 @@ impl LoginConfigHandler {
     }
 
     pub fn get_option_message_after_login(&self) -> Option<OptionMessage> {
-        if self.conn_type.eq(&ConnType::FILE_TRANSFER) || self.conn_type.eq(&ConnType::PORT_FORWARD)
+        if self.conn_type.eq(&ConnType::FILE_TRANSFER)
+            || self.conn_type.eq(&ConnType::PORT_FORWARD)
+            || self.conn_type.eq(&ConnType::RDP)
         {
             return None;
         }
@@ -1565,6 +1577,31 @@ impl LoginConfigHandler {
         }
     }
 
+    #[inline]
+    pub fn get_custom_resolution(&self, display: i32) -> Option<(i32, i32)> {
+        self.config
+            .custom_resolutions
+            .get(&display.to_string())
+            .map(|r| (r.w, r.h))
+    }
+
+    #[inline]
+    pub fn set_custom_resolution(&mut self, display: i32, wh: Option<(i32, i32)>) {
+        let display = display.to_string();
+        let mut config = self.load_config();
+        match wh {
+            Some((w, h)) => {
+                config
+                    .custom_resolutions
+                    .insert(display, Resolution { w, h });
+            }
+            None => {
+                config.custom_resolutions.remove(&display);
+            }
+        }
+        self.save_config(config);
+    }
+
     /// Get user name.
     /// Return the name of the given peer. If the peer has no name, return the name in the config.
     ///
@@ -1619,7 +1656,7 @@ impl LoginConfigHandler {
             }
         } else {
             let keyboard_modes =
-                common::get_supported_keyboard_modes(get_version_number(&pi.version));
+                crate::get_supported_keyboard_modes(get_version_number(&pi.version));
             let current_mode = &KeyboardMode::from_str(&config.keyboard_mode).unwrap_or_default();
             if !keyboard_modes.contains(current_mode) {
                 config.keyboard_mode = KeyboardMode::Legacy.to_string();
@@ -1658,7 +1695,7 @@ impl LoginConfigHandler {
         password: Vec<u8>,
     ) -> Message {
         #[cfg(any(target_os = "android", target_os = "ios"))]
-        let my_id = Config::get_id_or(crate::common::DEVICE_ID.lock().unwrap().clone());
+        let my_id = Config::get_id_or(crate::DEVICE_ID.lock().unwrap().clone());
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let my_id = Config::get_id();
         let mut lr = LoginRequest {
@@ -1683,7 +1720,7 @@ impl LoginConfigHandler {
                 show_hidden: !self.get_option("remote_show_hidden").is_empty(),
                 ..Default::default()
             }),
-            ConnType::PORT_FORWARD => lr.set_port_forward(PortForward {
+            ConnType::PORT_FORWARD | ConnType::RDP => lr.set_port_forward(PortForward {
                 host: self.port_forward.0.clone(),
                 port: self.port_forward.1,
                 ..Default::default()
@@ -1720,7 +1757,6 @@ impl LoginConfigHandler {
         self.force_relay = false;
         if direct && !received {
             let errno = errno::errno().0;
-            log::info!("errno is {}", errno);
             // TODO: check mac and ios
             if cfg!(windows) && errno == 10054 || !cfg!(windows) && errno == 104 {
                 self.force_relay = true;
@@ -1757,7 +1793,7 @@ pub fn start_video_audio_threads<F>(
     Arc<AtomicUsize>,
 )
 where
-    F: 'static + FnMut(&mut Vec<u8>) + Send,
+    F: 'static + FnMut(&mut scrap::ImageRgb) + Send,
 {
     let (video_sender, video_receiver) = mpsc::channel::<MediaData>();
     let video_queue = Arc::new(ArrayQueue::<VideoFrame>::new(VIDEO_QUEUE_SIZE));
@@ -1872,10 +1908,10 @@ pub async fn handle_test_delay(t: TestDelay, peer: &mut Stream) {
 #[cfg(all(target_os = "macos"))]
 fn check_scroll_on_mac(mask: i32, x: i32, y: i32) -> bool {
     // flutter version we set mask type bit to 4 when track pad scrolling.
-    if mask & 7 == 4 {
+    if mask & 7 == crate::input::MOUSE_TYPE_TRACKPAD {
         return true;
     }
-    if mask & 3 != 3 {
+    if mask & 3 != crate::input::MOUSE_TYPE_WHEEL {
         return false;
     }
     let btn = mask >> 3;
@@ -1936,9 +1972,12 @@ pub fn send_mouse(
     if command {
         mouse_event.modifiers.push(ControlKey::Meta.into());
     }
-    #[cfg(all(target_os = "macos"))]
+    #[cfg(all(target_os = "macos", not(feature = "flutter")))]
     if check_scroll_on_mac(mask, x, y) {
-        mouse_event.modifiers.push(ControlKey::Scroll.into());
+        let factor = 3;
+        mouse_event.mask = crate::input::MOUSE_TYPE_TRACKPAD;
+        mouse_event.x *= factor;
+        mouse_event.y *= factor;
     }
     interface.swap_modifier_mouse(&mut mouse_event);
     msg_out.set_mouse_event(mouse_event);
@@ -2489,17 +2528,52 @@ fn decode_id_pk(signed: &[u8], key: &sign::PublicKey) -> ResultType<(String, [u8
     if let Some(pk) = get_pk(&res.pk) {
         Ok((res.id, pk))
     } else {
-        bail!("Wrong public length");
+        bail!("Wrong their public length");
     }
 }
 
-#[cfg(feature = "flutter")]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) struct ClientClipboardContext;
+fn create_symmetric_key_msg(their_pk_b: [u8; 32]) -> (Bytes, Bytes, secretbox::Key) {
+    let their_pk_b = box_::PublicKey(their_pk_b);
+    let (our_pk_b, out_sk_b) = box_::gen_keypair();
+    let key = secretbox::gen_key();
+    let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
+    let sealed_key = box_::seal(&key.0, &nonce, &their_pk_b, &out_sk_b);
+    (Vec::from(our_pk_b.0).into(), sealed_key.into(), key)
+}
 
-#[cfg(not(feature = "flutter"))]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub(crate) struct ClientClipboardContext {
-    pub cfg: SessionPermissionConfig,
-    pub tx: UnboundedSender<Data>,
+async fn secure_punch_connection(conn: &mut FramedStream, key: &str) -> ResultType<()> {
+    let rs_pk = get_rs_pk(key);
+    let Some(rs_pk) = rs_pk else {
+        bail!("Handshake failed: invalid public key from rendezvous server");
+    };
+    match timeout(READ_TIMEOUT, conn.next()).await? {
+        Some(Ok(bytes)) => {
+            if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
+                match msg_in.union {
+                    Some(rendezvous_message::Union::KeyExchange(ex)) => {
+                        if ex.keys.len() != 1 {
+                            bail!("Handshake failed: invalid key exchange message");
+                        }
+                        let their_pk_b = sign::verify(&ex.keys[0], &rs_pk)
+                            .map_err(|_| anyhow!("Signature mismatch in key exchange"))?;
+                        let (asymmetric_value, symmetric_value, key) = create_symmetric_key_msg(
+                            get_pk(&their_pk_b)
+                                .context("Wrong their public length in key exchange")?,
+                        );
+                        let mut msg_out = RendezvousMessage::new();
+                        msg_out.set_key_exchange(KeyExchange {
+                            keys: vec![asymmetric_value, symmetric_value],
+                            ..Default::default()
+                        });
+                        timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
+                        conn.set_key(key);
+                        log::info!("Token secured");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

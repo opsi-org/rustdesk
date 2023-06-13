@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
@@ -27,9 +28,14 @@ class _PortForward {
 
 class PortForwardPage extends StatefulWidget {
   const PortForwardPage(
-      {Key? key, required this.id, required this.isRDP, this.forceRelay})
+      {Key? key,
+      required this.id,
+      required this.tabController,
+      required this.isRDP,
+      this.forceRelay})
       : super(key: key);
   final String id;
+  final DesktopTabController tabController;
   final bool isRDP;
   final bool? forceRelay;
 
@@ -49,12 +55,16 @@ class _PortForwardPageState extends State<PortForwardPage>
   void initState() {
     super.initState();
     _ffi = FFI();
-    _ffi.start(widget.id, isPortForward: true, forceRelay: widget.forceRelay);
+    _ffi.start(widget.id,
+        isPortForward: true,
+        forceRelay: widget.forceRelay,
+        isRdp: widget.isRDP);
     Get.put(_ffi, tag: 'pf_${widget.id}');
     if (!Platform.isLinux) {
       Wakelock.enable();
     }
     debugPrint("Port forward page init success with id ${widget.id}");
+    widget.tabController.onSelected?.call(widget.id);
   }
 
   @override
@@ -191,7 +201,7 @@ class _PortForwardPageState extends State<PortForwardPage>
                 (remoteHostController.text.isEmpty ||
                     remoteHostController.text.trim().isNotEmpty)) {
               await bind.sessionAddPortForward(
-                  id: 'pf_${widget.id}',
+                  sessionId: _ffi.sessionId,
                   localPort: localPort,
                   remoteHost: remoteHostController.text.trim().isEmpty
                       ? 'localhost'
@@ -251,7 +261,7 @@ class _PortForwardPageState extends State<PortForwardPage>
             icon: const Icon(Icons.close),
             onPressed: () async {
               await bind.sessionRemovePortForward(
-                  id: 'pf_${widget.id}', localPort: pf.localPort);
+                  sessionId: _ffi.sessionId, localPort: pf.localPort);
               refreshTunnelConfig();
             },
           ),
@@ -309,7 +319,8 @@ class _PortForwardPageState extends State<PortForwardPage>
                       child: SizedBox(
                         width: 120,
                         child: ElevatedButton(
-                          onPressed: () => bind.sessionNewRdp(id: widget.id),
+                          onPressed: () =>
+                              bind.sessionNewRdp(sessionId: _ffi.sessionId),
                           child: Text(
                             translate('New RDP'),
                           ),

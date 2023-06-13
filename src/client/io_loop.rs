@@ -18,6 +18,7 @@ use hbb_common::protobuf::Message as _;
 use hbb_common::rendezvous_proto::ConnType;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::sleep;
+#[cfg(not(target_os = "ios"))]
 use hbb_common::tokio::sync::mpsc::error::TryRecvError;
 #[cfg(windows)]
 use hbb_common::tokio::sync::Mutex as TokioMutex;
@@ -124,8 +125,10 @@ impl<T: InvokeUiSession> Remote<T> {
             Ok((mut peer, direct, pk)) => {
                 self.handler.set_connection_type(peer.is_secured(), direct); // flutter -> connection_ready
                 self.handler.set_connection_info(direct, false);
-                self.handler
-                    .set_fingerprint(crate::common::pk_to_fingerprint(pk.unwrap_or_default()));
+                if conn_type == ConnType::DEFAULT_CONN {
+                    self.handler
+                        .set_fingerprint(crate::common::pk_to_fingerprint(pk.unwrap_or_default()));
+                }
 
                 // just build for now
                 #[cfg(not(windows))]
@@ -142,7 +145,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         || self.handler.is_rdp();
                     if !is_conn_not_default {
                         (self.client_conn_id, rx_clip_client_lock) =
-                            clipboard::get_rx_cliprdr_client(&self.handler.id);
+                            clipboard::get_rx_cliprdr_client(&self.handler.session_id);
                     };
                 }
                 #[cfg(windows)]
@@ -259,7 +262,7 @@ impl<T: InvokeUiSession> Remote<T> {
             }
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        Client::try_stop_clipboard(&self.handler.id);
+        Client::try_stop_clipboard(&self.handler.session_id);
     }
 
     fn handle_job_status(&mut self, id: i32, file_num: i32, err: Option<String>) {
@@ -841,7 +844,7 @@ impl<T: InvokeUiSession> Remote<T> {
         use video_frame::Union::*;
         match &vf.union {
             Some(vf) => match vf {
-                Vp8s(f) | Vp9s(f) | H264s(f) | H265s(f) => f.frames.iter().any(|e| e.key),
+                Vp8s(f) | Vp9s(f) | Av1s(f) | H264s(f) | H265s(f) => f.frames.iter().any(|e| e.key),
                 _ => false,
             },
             None => false,
@@ -1198,7 +1201,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     Some(misc::Union::SwitchDisplay(s)) => {
-                        self.handler.ui_handler.switch_display(&s);
+                        self.handler.handle_peer_switch_display(&s);
                         self.video_sender.send(MediaData::Reset).ok();
                         if s.width > 0 && s.height > 0 {
                             self.handler.set_display(
