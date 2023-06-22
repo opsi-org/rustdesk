@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/hbbs/hbbs.dart';
-import 'package:flutter_hbb/common/widgets/peer_tab_page.dart';
 import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
 
@@ -12,7 +12,6 @@ import 'platform_model.dart';
 
 class UserModel {
   final RxString userName = ''.obs;
-  final RxString groupName = ''.obs;
   final RxBool isAdmin = false.obs;
   WeakReference<FFI> parent;
 
@@ -21,9 +20,10 @@ class UserModel {
   void refreshCurrentUser() async {
     final token = bind.mainGetLocalOption(key: 'access_token');
     if (token == '') {
-      await _updateOtherModels();
+      await updateOtherModels();
       return;
     }
+    _updateLocalUserInfo();
     final url = await bind.mainGetApiServer();
     final body = {
       'id': await bind.mainGetMyId(),
@@ -41,39 +41,57 @@ class UserModel {
         reset();
         return;
       }
-      final data = json.decode(response.body);
+      final data = json.decode(utf8.decode(response.bodyBytes));
       final error = data['error'];
       if (error != null) {
         throw error;
       }
 
       final user = UserPayload.fromJson(data);
-      await _parseAndUpdateUser(user);
+      _parseAndUpdateUser(user);
     } catch (e) {
-      print('Failed to refreshCurrentUser: $e');
+      debugPrint('Failed to refreshCurrentUser: $e');
     } finally {
-      await _updateOtherModels();
+      await updateOtherModels();
+    }
+  }
+
+  static Map<String, dynamic>? getLocalUserInfo() {
+    final userInfo = bind.mainGetLocalOption(key: 'user_info');
+    if (userInfo == '') {
+      return null;
+    }
+    try {
+      return json.decode(userInfo);
+    } catch (e) {
+      debugPrint('Failed to get local user info, json decode "$userInfo": $e');
+    }
+    return null;
+  }
+
+  _updateLocalUserInfo() {
+    final userInfo = getLocalUserInfo();
+    if (userInfo != null) {
+      userName.value = userInfo['name'];
     }
   }
 
   Future<void> reset() async {
     await bind.mainSetLocalOption(key: 'access_token', value: '');
+    await bind.mainSetLocalOption(key: 'user_info', value: '');
     await gFFI.abModel.reset();
     await gFFI.groupModel.reset();
     userName.value = '';
-    groupName.value = '';
-    gFFI.peerTabModel.check_dynamic_tabs();
   }
 
-  Future<void> _parseAndUpdateUser(UserPayload user) async {
+  _parseAndUpdateUser(UserPayload user) {
     userName.value = user.name;
-    groupName.value = user.grp;
     isAdmin.value = user.isAdmin;
   }
 
-  Future<void> _updateOtherModels() async {
-    await gFFI.abModel.pullAb();
-    await gFFI.groupModel.pull();
+  // update ab and group status
+  static Future<void> updateOtherModels() async {
+    await Future.wait([gFFI.abModel.pullAb(), gFFI.groupModel.pull()]);
   }
 
   Future<void> logOut() async {
@@ -91,7 +109,7 @@ class UserModel {
               headers: authHeaders)
           .timeout(Duration(seconds: 2));
     } catch (e) {
-      print("request /api/logout failed: err=$e");
+      debugPrint("request /api/logout failed: err=$e");
     } finally {
       await reset();
       gFFI.dialogManager.dismissByTag(tag);
@@ -107,28 +125,43 @@ class UserModel {
 
     final Map<String, dynamic> body;
     try {
-      body = jsonDecode(resp.body);
+      body = jsonDecode(utf8.decode(resp.bodyBytes));
     } catch (e) {
-      print("jsonDecode resp body failed: ${e.toString()}");
+      debugPrint("login: jsonDecode resp body failed: ${e.toString()}");
       rethrow;
     }
-
     if (resp.statusCode != 200) {
       throw RequestException(resp.statusCode, body['error'] ?? '');
     }
 
+    return getLoginResponseFromAuthBody(body);
+  }
+
+  LoginResponse getLoginResponseFromAuthBody(Map<String, dynamic> body) {
     final LoginResponse loginResponse;
     try {
       loginResponse = LoginResponse.fromJson(body);
     } catch (e) {
-      print("jsonDecode LoginResponse failed: ${e.toString()}");
+      debugPrint("login: jsonDecode LoginResponse failed: ${e.toString()}");
       rethrow;
     }
 
     if (loginResponse.user != null) {
-      await _parseAndUpdateUser(loginResponse.user!);
+      _parseAndUpdateUser(loginResponse.user!);
     }
 
     return loginResponse;
+  }
+
+  static Future<List<dynamic>> queryLoginOptions() async {
+    try {
+      final url = await bind.mainGetApiServer();
+      final resp = await http.get(Uri.parse('$url/api/login-options'));
+      return jsonDecode(resp.body);
+    } catch (e) {
+      debugPrint(
+          "queryLoginOptions: jsonDecode resp body failed: ${e.toString()}");
+      return [];
+    }
   }
 }
