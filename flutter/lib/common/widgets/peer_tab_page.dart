@@ -1,26 +1,18 @@
-import 'dart:math';
-import 'dart:ui' as ui;
-
-import 'package:bot_toast/bot_toast.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/address_book.dart';
 import 'package:flutter_hbb/common/widgets/my_group.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/common/widgets/peer_card.dart';
+import 'package:flutter_hbb/common/widgets/animated_rotation_widget.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
-import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
-import 'package:flutter_hbb/desktop/widgets/material_mod_popup_menu.dart'
-    as mod_menu;
+
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:get/get.dart';
-import 'package:get/get_rx/src/rx_workers/utils/debouncer.dart';
 import 'package:provider/provider.dart';
-import 'package:visibility_detector/visibility_detector.dart';
-import 'package:dropdown_button2/dropdown_button2.dart';
 
 import '../../common.dart';
+import '../../models/group_model.dart';
 import '../../models/platform_model.dart';
 
 class PeerTabPage extends StatefulWidget {
@@ -41,8 +33,6 @@ EdgeInsets? _menuPadding() {
 
 class _PeerTabPageState extends State<PeerTabPage>
     with SingleTickerProviderStateMixin {
-  bool _hideSort = bind.getLocalFlutterConfig(k: 'peer-tab-index') == '0';
-
   final List<_TabEntry> entries = [
     _TabEntry(
         RecentPeersView(
@@ -63,14 +53,14 @@ class _PeerTabPageState extends State<PeerTabPage>
         AddressBook(
           menuPadding: _menuPadding(),
         ),
-        () => {}),
+        () => gFFI.abModel.pullAb()),
     _TabEntry(
-        MyGroup(
-          menuPadding: _menuPadding(),
-        ),
-        () => {}),
+      MyGroup(
+        menuPadding: _menuPadding(),
+      ),
+      () => gFFI.groupModel.pull(),
+    ),
   ];
-  final _scrollDebounce = Debouncer(delay: Duration(milliseconds: 50));
 
   @override
   void initState() {
@@ -87,7 +77,6 @@ class _PeerTabPageState extends State<PeerTabPage>
     if (tabIndex < entries.length) {
       gFFI.peerTabModel.setCurrentTab(tabIndex);
       entries[tabIndex].load();
-      _hideSort = tabIndex == 0;
     }
   }
 
@@ -101,21 +90,17 @@ class _PeerTabPageState extends State<PeerTabPage>
           height: 28,
           child: Container(
             padding: isDesktop ? null : EdgeInsets.symmetric(horizontal: 2),
-            constraints: isDesktop ? null : kMobilePageConstraints,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Expanded(
-                    child:
-                        visibleContextMenuListener(_createSwitchBar(context))),
-                buildScrollJumper(),
-                const PeerSearchBar(),
+                Expanded(child: _createSwitchBar(context)),
+                const PeerSearchBar().marginOnly(right: isMobile ? 0 : 13),
+                _createRefresh(),
                 Offstage(
                     offstage: !isDesktop,
-                    child: _createPeerViewTypeSwitch(context)
-                        .marginOnly(left: 13)),
+                    child: _createPeerViewTypeSwitch(context)),
                 Offstage(
-                  offstage: _hideSort,
+                  offstage: gFFI.peerTabModel.currentTab == 0,
                   child: PeerSortDropdown().marginOnly(left: 8),
                 ),
               ],
@@ -129,114 +114,86 @@ class _PeerTabPageState extends State<PeerTabPage>
 
   Widget _createSwitchBar(BuildContext context) {
     final model = Provider.of<PeerTabModel>(context);
-    int indexCounter = -1;
-    return ReorderableListView(
-        buildDefaultDragHandles: false,
-        onReorder: (oldIndex, newIndex) {
-          model.onReorder(oldIndex, newIndex);
-        },
+
+    getTabChild(int t) {
+      final color = model.currentTab == t
+          ? MyTheme.tabbar(context).selectedTextColor
+          : MyTheme.tabbar(context).unSelectedTextColor
+        ?..withOpacity(0.5);
+      return Obx(() => Tooltip(
+            message: model.tabTooltip(t, gFFI.groupModel.groupName.value),
+            child: Icon(model.tabIcon(t), color: color),
+          ));
+    }
+
+    return ListView(
         scrollDirection: Axis.horizontal,
         physics: NeverScrollableScrollPhysics(),
-        scrollController: model.sc,
-        children: model.visibleOrderedTabs.map((t) {
-          indexCounter++;
-          return ReorderableDragStartListener(
-            key: ValueKey(t),
-            index: indexCounter,
-            child: VisibilityDetector(
-              key: ValueKey(t),
-              onVisibilityChanged: (info) {
-                final id = (info.key as ValueKey).value;
-                model.setTabFullyVisible(id, info.visibleFraction > 0.99);
-              },
-              child: Listener(
-                // handle mouse wheel
-                onPointerSignal: (e) {
-                  if (e is PointerScrollEvent) {
-                    if (!model.sc.canScroll) return;
-                    _scrollDebounce.call(() {
-                      model.sc.animateTo(model.sc.offset + e.scrollDelta.dy,
-                          duration: Duration(milliseconds: 200),
-                          curve: Curves.ease);
-                    });
-                  }
-                },
-                child: InkWell(
-                  child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      decoration: BoxDecoration(
-                        color: model.currentTab == t
-                            ? Theme.of(context).colorScheme.background
-                            : null,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Align(
-                        alignment: Alignment.center,
-                        child: Text(
-                          model.translatedTabname(t),
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                              height: 1,
-                              fontSize: 14,
-                              color: model.currentTab == t
-                                  ? MyTheme.tabbar(context).selectedTextColor
-                                  : MyTheme.tabbar(context).unSelectedTextColor
-                                ?..withOpacity(0.5)),
-                        ),
-                      )),
-                  onTap: () async {
-                    await handleTabSelection(t);
-                    await bind.setLocalFlutterConfig(
-                        k: 'peer-tab-index', v: t.toString());
-                  },
+        children: model.indexs.map((t) {
+          return InkWell(
+            child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  color: model.currentTab == t
+                      ? Theme.of(context).colorScheme.background
+                      : null,
+                  borderRadius: BorderRadius.circular(6),
                 ),
-              ),
-            ),
+                child: Align(
+                  alignment: Alignment.center,
+                  child: getTabChild(t),
+                )),
+            onTap: () async {
+              await handleTabSelection(t);
+              await bind.setLocalFlutterConfig(
+                  k: 'peer-tab-index', v: t.toString());
+            },
           );
         }).toList());
-  }
-
-  Widget buildScrollJumper() {
-    final model = Provider.of<PeerTabModel>(context);
-    return Offstage(
-        offstage: !model.showScrollBtn,
-        child: Row(
-          children: [
-            GestureDetector(
-                child: Icon(Icons.arrow_left,
-                    size: 22,
-                    color: model.leftFullyVisible
-                        ? Theme.of(context).disabledColor
-                        : null),
-                onTap: model.sc.backward),
-            GestureDetector(
-                child: Icon(Icons.arrow_right,
-                    size: 22,
-                    color: model.rightFullyVisible
-                        ? Theme.of(context).disabledColor
-                        : null),
-                onTap: model.sc.forward)
-          ],
-        ));
   }
 
   Widget _createPeersView() {
     final model = Provider.of<PeerTabModel>(context);
     Widget child;
-    if (model.visibleOrderedTabs.isEmpty) {
-      child = visibleContextMenuListener(Center(
+    if (model.indexs.isEmpty) {
+      child = Center(
         child: Text(translate('Right click to select tabs')),
-      ));
+      );
     } else {
-      if (model.visibleOrderedTabs.contains(model.currentTab)) {
+      if (model.indexs.contains(model.currentTab)) {
         child = entries[model.currentTab].widget;
       } else {
-        model.setCurrentTab(model.visibleOrderedTabs[0]);
+        Future.delayed(Duration.zero, () {
+          model.setCurrentTab(model.indexs[0]);
+        });
         child = entries[0].widget;
       }
     }
     return Expanded(
         child: child.marginSymmetric(vertical: isDesktop ? 12.0 : 6.0));
+  }
+
+  Widget _createRefresh() {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    return Offstage(
+      offstage: gFFI.peerTabModel.currentTab < 3, // local tab can't see effect
+      child: Container(
+        padding: EdgeInsets.all(4.0),
+        child: AnimatedRotationWidget(
+            onPressed: () {
+              if (gFFI.peerTabModel.currentTab < entries.length) {
+                entries[gFFI.peerTabModel.currentTab].load();
+              }
+            },
+            child: RotatedBox(
+                quarterTurns: 2,
+                child: Icon(
+                  Icons.refresh,
+                  size: 18,
+                  color: textColor,
+                ))),
+      ),
+    );
   }
 
   Widget _createPeerViewTypeSwitch(BuildContext context) {
@@ -268,57 +225,6 @@ class _PeerTabPageState extends State<PeerTabPage>
             )),
       ),
     );
-  }
-
-  Widget visibleContextMenuListener(Widget child) {
-    return Listener(
-        onPointerDown: (e) {
-          if (e.kind != ui.PointerDeviceKind.mouse) {
-            return;
-          }
-          if (e.buttons == 2) {
-            showRightMenu(
-              (CancelFunc cancelFunc) {
-                return visibleContextMenu(cancelFunc);
-              },
-              target: e.position,
-            );
-          }
-        },
-        child: child);
-  }
-
-  Widget visibleContextMenu(CancelFunc cancelFunc) {
-    final model = Provider.of<PeerTabModel>(context);
-    final List<MenuEntryBase> menu = List.empty(growable: true);
-    final List<int> menuIndex = List.empty(growable: true);
-    var list = model.orderedNotFilteredTabs();
-    for (int i = 0; i < list.length; i++) {
-      int tabIndex = list[i];
-      int bitMask = 1 << tabIndex;
-      menuIndex.add(tabIndex);
-      menu.add(MenuEntrySwitch(
-          switchType: SwitchType.scheckbox,
-          text: model.translatedTabname(tabIndex),
-          getter: () async {
-            return model.tabHiddenFlag & bitMask == 0;
-          },
-          setter: (show) async {
-            model.onHideShow(tabIndex, show);
-            cancelFunc();
-          }));
-    }
-    return mod_menu.PopupMenu(
-        items: menu
-            .map((entry) => entry.build(
-                context,
-                const MenuConfig(
-                  commonColor: MyTheme.accent,
-                  height: 20.0,
-                  dividerHeight: 12.0,
-                )))
-            .expand((i) => i)
-            .toList());
   }
 }
 
