@@ -43,9 +43,6 @@ class _AddressBookState extends State<AddressBook> {
           if (gFFI.abModel.abError.isNotEmpty) {
             return _buildShowError(gFFI.abModel.abError.value);
           }
-          if (gFFI.abModel.fromServer.isFalse) {
-            return Offstage();
-          }
           return isDesktop
               ? _buildAddressBookDesktop()
               : _buildAddressBookMobile();
@@ -76,7 +73,7 @@ class _AddressBookState extends State<AddressBook> {
               border:
                   Border.all(color: Theme.of(context).colorScheme.background)),
           child: Container(
-            width: 180,
+            width: 150,
             height: double.infinity,
             padding: const EdgeInsets.all(8.0),
             child: Column(
@@ -167,6 +164,7 @@ class _AddressBookState extends State<AddressBook> {
           alignment: Alignment.topLeft,
           child: Obx(() => AddressBookPeersView(
                 menuPadding: widget.menuPadding,
+                // ignore: invalid_use_of_protected_member
                 initPeers: gFFI.abModel.peers.value,
               ))),
     );

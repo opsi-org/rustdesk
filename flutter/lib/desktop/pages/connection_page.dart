@@ -243,8 +243,8 @@ class _ConnectionPageState extends State<ConnectionPage>
 
   Widget buildStatus() {
     final em = 14.0;
-    return ConstrainedBox(
-      constraints: BoxConstraints.tightFor(height: 3 * em),
+    return Container(
+      height: 3 * em,
       child: Obx(() => Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
@@ -253,7 +253,8 @@ class _ConnectionPageState extends State<ConnectionPage>
                 width: 8,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(4),
-                  color: svcStopped.value || stateGlobal.svcStatus.value == SvcStatus.connecting
+                  color: svcStopped.value ||
+                          stateGlobal.svcStatus.value == SvcStatus.connecting
                       ? kColorWarn
                       : (stateGlobal.svcStatus.value == SvcStatus.ready
                           ? Color.fromARGB(255, 50, 190, 166)
@@ -343,13 +344,6 @@ class _ConnectionPageState extends State<ConnectionPage>
       }
     } else {
       stateGlobal.svcStatus.value = SvcStatus.notReady;
-    }
-    if (stateGlobal.svcStatus.value != SvcStatus.ready) {
-      gFFI.userModel.isAdmin.value = false;
-      gFFI.groupModel.reset();
-    }
-    if (preStatus != stateGlobal.svcStatus.value) {
-      UserModel.updateOtherModels();
     }
     svcIsUsingPublicServer.value = await bind.mainIsUsingPublicServer();
   }
