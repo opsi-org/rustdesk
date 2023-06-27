@@ -12,7 +12,6 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../common.dart';
-import '../../models/group_model.dart';
 import '../../models/platform_model.dart';
 
 class PeerTabPage extends StatefulWidget {
@@ -23,7 +22,7 @@ class PeerTabPage extends StatefulWidget {
 
 class _TabEntry {
   final Widget widget;
-  final Function() load;
+  final Function({dynamic hint}) load;
   _TabEntry(this.widget, this.load);
 }
 
@@ -53,12 +52,12 @@ class _PeerTabPageState extends State<PeerTabPage>
         AddressBook(
           menuPadding: _menuPadding(),
         ),
-        () => gFFI.abModel.pullAb()),
+        ({dynamic hint}) => gFFI.abModel.pullAb(force: hint == null)),
     _TabEntry(
       MyGroup(
         menuPadding: _menuPadding(),
       ),
-      () => gFFI.groupModel.pull(),
+      ({dynamic hint}) => gFFI.groupModel.pull(force: hint == null),
     ),
   ];
 
@@ -76,7 +75,7 @@ class _PeerTabPageState extends State<PeerTabPage>
   Future<void> handleTabSelection(int tabIndex) async {
     if (tabIndex < entries.length) {
       gFFI.peerTabModel.setCurrentTab(tabIndex);
-      entries[tabIndex].load();
+      entries[tabIndex].load(hint: false);
     }
   }
 
@@ -87,7 +86,7 @@ class _PeerTabPageState extends State<PeerTabPage>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SizedBox(
-          height: 28,
+          height: 32,
           child: Container(
             padding: isDesktop ? null : EdgeInsets.symmetric(horizontal: 2),
             child: Row(
@@ -115,40 +114,40 @@ class _PeerTabPageState extends State<PeerTabPage>
   Widget _createSwitchBar(BuildContext context) {
     final model = Provider.of<PeerTabModel>(context);
 
-    getTabChild(int t) {
-      final color = model.currentTab == t
-          ? MyTheme.tabbar(context).selectedTextColor
-          : MyTheme.tabbar(context).unSelectedTextColor
-        ?..withOpacity(0.5);
-      return Obx(() => Tooltip(
-            message: model.tabTooltip(t, gFFI.groupModel.groupName.value),
-            child: Icon(model.tabIcon(t), color: color),
-          ));
-    }
-
     return ListView(
         scrollDirection: Axis.horizontal,
         physics: NeverScrollableScrollPhysics(),
         children: model.indexs.map((t) {
-          return InkWell(
-            child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                decoration: BoxDecoration(
-                  color: model.currentTab == t
-                      ? Theme.of(context).colorScheme.background
-                      : null,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Align(
-                  alignment: Alignment.center,
-                  child: getTabChild(t),
-                )),
-            onTap: () async {
-              await handleTabSelection(t);
-              await bind.setLocalFlutterConfig(
-                  k: 'peer-tab-index', v: t.toString());
-            },
-          );
+          final selected = model.currentTab == t;
+          final color = selected
+              ? MyTheme.tabbar(context).selectedTextColor
+              : MyTheme.tabbar(context).unSelectedTextColor
+            ?..withOpacity(0.5);
+          final hover = false.obs;
+          final deco = BoxDecoration(
+              color: Theme.of(context).colorScheme.background,
+              borderRadius: BorderRadius.circular(6));
+          final decoBorder = BoxDecoration(
+              border: Border(
+            bottom: BorderSide(width: 2, color: color!),
+          ));
+          return Obx(() => InkWell(
+                child: Container(
+                  decoration:
+                      selected ? decoBorder : (hover.value ? deco : null),
+                  child: Tooltip(
+                    message:
+                        model.tabTooltip(t, gFFI.groupModel.groupName.value),
+                    child: Icon(model.tabIcon(t), color: color),
+                  ).paddingSymmetric(horizontal: 4),
+                ).paddingSymmetric(horizontal: 4),
+                onTap: () async {
+                  await handleTabSelection(t);
+                  await bind.setLocalFlutterConfig(
+                      k: 'peer-tab-index', v: t.toString());
+                },
+                onHover: (value) => hover.value = value,
+              ));
         }).toList());
   }
 
@@ -198,17 +197,19 @@ class _PeerTabPageState extends State<PeerTabPage>
 
   Widget _createPeerViewTypeSwitch(BuildContext context) {
     final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    final types = [PeerUiType.grid, PeerUiType.list];
+    final hover = false.obs;
     final deco = BoxDecoration(
       color: Theme.of(context).colorScheme.background,
       borderRadius: BorderRadius.circular(5),
     );
-    final types = [PeerUiType.grid, PeerUiType.list];
 
     return Obx(
       () => Container(
         padding: EdgeInsets.all(4.0),
-        decoration: deco,
+        decoration: hover.value ? deco : null,
         child: InkWell(
+            onHover: (value) => hover.value = value,
             onTap: () async {
               final type = types.elementAt(
                   peerCardUiType.value == types.elementAt(0) ? 1 : 0);
@@ -218,7 +219,7 @@ class _PeerTabPageState extends State<PeerTabPage>
             },
             child: Icon(
               peerCardUiType.value == PeerUiType.grid
-                  ? Icons.list
+                  ? Icons.view_list_rounded
                   : Icons.grid_view_rounded,
               size: 18,
               color: textColor,
@@ -389,7 +390,7 @@ class _PeerSortDropdownState extends State<PeerSortDropdown> {
     var menuPos = RelativeRect.fromLTRB(0, 0, 0, 0);
     return InkWell(
       child: Icon(
-        Icons.sort,
+        Icons.sort_rounded,
         size: 18,
       ),
       onTapDown: (details) {
